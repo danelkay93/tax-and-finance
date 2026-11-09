@@ -14,6 +14,11 @@ i.e. an object with "accounts": [{"accountNumber", "currency"?, "txns": [...]}].
 Each transaction needs a "description" and an amount. The amount is read from
 "amount" (CSV-style input) or, when that is absent, from "chargedAmount", which is
 the field the library actually emits. The library has no "amount" field at all.
+
+Malformed input fails before selection. --completed-only (also --exclude-pending)
+keeps only an explicit, exact source status of "completed"; CSV rows without a
+status are not assumed settled. The default is a running, not settlement-certified,
+view. Numeric account references alone never establish an own transfer.
 """
 
 import sys
@@ -240,10 +245,46 @@ CURRENCY_SYMBOLS = {"$": "USD", "€": "EUR", "£": "GBP"}
 # user's own accounts.
 NOT_SPENDING = ("savings", "card_bill", "transfer")
 
-# Every account number seen in a scrape object, including accounts with no transactions in
-# the period (a Leumi savings account is usually empty), so a transfer INTO one is still
-# recognised as an own transfer.
-SCRAPED_ACCOUNTS = set()
+def _input_error(path, message):
+    """Fail closed without echoing transaction contents."""
+    print(f"Error: {path}: {message}. No analysis was produced.", file=sys.stderr)
+    sys.exit(1)
+
+
+def _validate_transaction(txn, path):
+    if not isinstance(txn, dict):
+        _input_error(path, "expected a transaction object")
+    if not isinstance(txn.get("description"), str) or not txn["description"].strip():
+        _input_error(path, "description must be a nonblank string")
+    for field in ("status", "currency", "chargedCurrency", "originalCurrency", "type", "date", "processedDate"):
+        if txn.get(field) is not None and not isinstance(txn[field], str):
+            _input_error(path, f"{field} must be a string or null")
+    if "amount" in txn:
+        _to_number(txn["amount"], path)
+    elif "chargedAmount" in txn:
+        if not (txn["chargedAmount"] is None and txn.get("status") == "pending"):
+            _to_number(txn["chargedAmount"], path)
+    else:
+        _input_error(path, "missing amount and chargedAmount")
+    if txn.get("originalAmount") is not None:
+        _to_number(txn["originalAmount"], path)
+    if txn.get("installments") is not None:
+        inst = txn["installments"]
+        if not isinstance(inst, dict):
+            _input_error(path, "installments must be an object or null")
+        for field in ("number", "total"):
+            value = inst.get(field)
+            if value is not None and (type(value) is not int or value < 0):
+                _input_error(path, f"installments.{field} must be a nonnegative integer or null")
+
+
+def _status_class(txn):
+    """Classify source evidence; do not infer, normalize or fill a status."""
+    if "status" not in txn:
+        return "missing"
+    if txn["status"] is None:
+        return "null"
+    return txn["status"] if txn["status"] in ("completed", "pending") else "unrecognized"
 
 
 def flatten_scrape_result(data):
@@ -256,8 +297,17 @@ def flatten_scrape_result(data):
     exposes from library 6.12.0, is not summed into shekel totals.
     """
     if isinstance(data, list):
-        return data
-    if isinstance(data, dict) and isinstance(data.get("accounts"), list):
+        flat = []
+        for i, txn in enumerate(data):
+            path = f"$[{i}]"
+            _validate_transaction(txn, path)
+            flat.append({**txn, "_input_path": path})
+        return flat
+    if isinstance(data, dict):
+        if not isinstance(data.get("accounts"), list):
+            _input_error("$.accounts", "expected an array (an empty array is valid)")
+        if "success" in data and type(data["success"]) is not bool:
+            _input_error("$.success", "expected a boolean")
         if data.get("success") is False:
             print(
                 f"Error: the scrape reported failure ({data.get('errorType', 'unknown error')}"
@@ -267,20 +317,22 @@ def flatten_scrape_result(data):
             )
             sys.exit(1)
         flat = []
-        SCRAPED_ACCOUNTS.clear()
-        SCRAPED_ACCOUNTS.update(
-            str(a.get("accountNumber")) for a in data["accounts"]
-            if isinstance(a, dict) and a.get("accountNumber")
-        )
-        for acc in data["accounts"]:
+        for i, acc in enumerate(data["accounts"]):
+            path = f"$.accounts[{i}]"
             if not isinstance(acc, dict):
-                continue
-            for txn in acc.get("txns") or []:
-                if isinstance(txn, dict):
-                    flat.append({**txn, "_accountCurrency": acc.get("currency"),
-                                 "_accountNumber": acc.get("accountNumber")})
+                _input_error(path, "expected an account object")
+            if not isinstance(acc.get("txns"), list):
+                _input_error(path + ".txns", "expected an array (an empty array is valid)")
+            if acc.get("currency") is not None and not isinstance(acc["currency"], str):
+                _input_error(path + ".currency", "expected a string or null")
+            for j, txn in enumerate(acc["txns"]):
+                txn_path = f"{path}.txns[{j}]"
+                _validate_transaction(txn, txn_path)
+                flat.append({**txn, "_accountCurrency": acc.get("currency"),
+                             "_accountNumber": acc.get("accountNumber"),
+                             "_input_path": txn_path})
         return flat
-    return None
+    _input_error("$", "expected a transaction array or an object with an accounts array")
 
 
 def _norm_currency(cur):
@@ -339,32 +391,6 @@ def _to_number(raw, desc):
     return float(raw)
 
 
-def _names_account(desc, acct):
-    """True if the description names this account number as its own token.
-
-    Matches the full digits or the account part (last 6 digits, after bank and branch), but
-    only as a delimited number, never inside a longer reference number. Hyphenated forms such
-    as 12-800-123456 are read both whole and piecewise.
-    """
-    text = str(desc)
-    # Joined on "-" and "/" only: a space between two numbers usually separates them.
-    runs = re.findall(r"\d+", text) + [re.sub(r"\D", "", m) for m in re.findall(r"\d+(?:[-/]\d+)+", text)]
-    tail = acct[-6:]
-    for r in runs:
-        if r == acct or (len(acct) > 6 and r == tail):
-            return True
-    return False
-
-
-def _own_account_digits(transactions):
-    digits = set()
-    for raw in [t.get("_accountNumber") for t in transactions] + list(SCRAPED_ACCOUNTS):
-        d = re.sub(r"\D", "", str(raw or ""))
-        if len(d) >= 5:
-            digits.add(d)
-    return digits
-
-
 def analyze_transactions(transactions: list[dict]) -> dict:
     """Analyze and categorize a list of transactions.
 
@@ -375,6 +401,10 @@ def analyze_transactions(transactions: list[dict]) -> dict:
     Returns:
         Analysis dictionary with category totals, top merchants, etc.
     """
+    if not isinstance(transactions, list):
+        _input_error("$", "expected a transaction array")
+    for i, txn in enumerate(transactions):
+        _validate_transaction(txn, f"$[{i}]")
     categories = defaultdict(float)
     category_count = defaultdict(int)
     merchants = defaultdict(float)
@@ -392,9 +422,14 @@ def analyze_transactions(transactions: list[dict]) -> dict:
     pending_full_price_count = 0
     pending_full_price_total = 0.0
     instalment_count = 0
-    own_accounts = _own_account_digits(transactions)
+    status_counts = defaultdict(int)
 
-    for txn in transactions:
+    for i, txn in enumerate(transactions):
+        status_class = _status_class(txn)
+        status_counts[status_class] += 1
+        txn = {**txn, "_input_path": txn.get("_input_path", f"$[{i}]"),
+               "_status_provenance": "source_field" if "status" in txn else "missing",
+               "_status_class": status_class}
         desc = txn.get("description", "Unknown")
         status = txn.get("status")
         if "amount" in txn:
@@ -422,12 +457,8 @@ def analyze_transactions(transactions: list[dict]) -> dict:
             sys.exit(1)
 
         original = txn.get("originalAmount")
-        if isinstance(original, str):
-            try:
-                original = float(original.replace(",", "").strip())
-            except ValueError:
-                original = None
-        original = original if isinstance(original, (int, float)) and not isinstance(original, bool) else None
+        if original is not None:
+            original = _to_number(original, txn["_input_path"])
         if uses_charged and status == "pending" and original and raw_amount and (original > 0) != (raw_amount > 0):
             # Visa Cal emits a pending CREDIT with a negative chargedAmount and a positive
             # originalAmount. The original's sign is the one that says refund vs purchase.
@@ -441,7 +472,11 @@ def analyze_transactions(transactions: list[dict]) -> dict:
                     cur = _norm_currency(txn.get("originalCurrency")) or "ILS"
                     cur = "ILS" if cur in SHEKEL_CODES else cur
                     pending_unknown_original[cur] += abs(original)
-            # A zero line otherwise carries no signal and would create an empty merchant row.
+            # Preserve every accepted row, including zero/unknown amounts, for audit.
+            categorized.append({**txn, "amount": None if uses_charged and status == "pending" else raw_amount,
+                                "category": None,
+                                "is_credit": None if uses_charged and status == "pending" else False,
+                                "excluded": "pending_amount_unknown" if uses_charged and status == "pending" else "zero_amount"})
             continue
         amount = abs(raw_amount)
 
@@ -477,11 +512,8 @@ def analyze_transactions(transactions: list[dict]) -> dict:
         if txn.get("type") == "installments" and raw_amount < 0:
             instalment_count += 1
         category = categorize_transaction(desc)
-        if own_accounts and category not in ("savings", "card_bill"):
-            line_acct = re.sub(r"\D", "", str(txn.get("_accountNumber") or ""))
-            if any(a != line_acct and _names_account(desc, a) for a in own_accounts):
-                # The description names another of the user's own scraped accounts.
-                category = "transfer"
+        # A matching account number/tail may be an invoice or merchant reference.
+        # Without independent transfer evidence it must not remove spending.
 
         # A positive amount on a statement line is money coming IN: a refund, a reversal,
         # but ALSO salary, a transfer in, a loan drawdown. Counting its absolute value as
@@ -516,6 +548,13 @@ def analyze_transactions(transactions: list[dict]) -> dict:
     )[:10]
 
     warnings = []
+    uncertain_status_count = sum(status_counts[k] for k in ("missing", "null", "unrecognized"))
+    if uncertain_status_count:
+        warnings.append(
+            f"{uncertain_status_count} accepted rows have no recognized settlement status. "
+            "This running view does not establish completion; use --completed-only for "
+            "explicit source status 'completed'. Statusless CSV rows are not assumed settled."
+        )
     debit_lines = sum(category_count.values())
     if debit_lines == 0 and credit_total > 0:
         warnings.append(
@@ -525,6 +564,13 @@ def analyze_transactions(transactions: list[dict]) -> dict:
         )
 
     return {
+        "status_policy": "running",
+        "status_counts": dict(status_counts),
+        # Accepted means retained in analysis/transactions, including separately excluded
+        # zero/pending/foreign rows. Excluded here means filtered BEFORE analysis only.
+        "row_counts": {"received": len(transactions), "accepted": len(transactions),
+                       "excluded": 0, "rejected": 0},
+        "excluded_rows": [],
         "total_spending": round(total, 2),
         "total_savings": round(savings, 2),
         "total_outflow": round(total_outflow, 2),
@@ -560,6 +606,9 @@ def format_analysis(analysis: dict, period: str = "Current") -> str:
     lines = [
         f"=== Spending Analysis ({period}) ===",
         "",
+        f"  Status policy: {analysis.get('status_policy', 'running')}",
+        *([f"  Rows: {analysis['row_counts']['received']} received; {analysis['row_counts']['accepted']} accepted; {analysis['row_counts']['excluded']} excluded before analysis; {analysis['row_counts']['rejected']} rejected"]
+          if "row_counts" in analysis else []),
         *[f"  WARNING: {w}" for w in analysis.get("warnings", [])],
         f"  Total Spending: {analysis['total_spending']:>10,.2f} NIS",
         f"  Into Savings:   {analysis['total_savings']:>10,.2f} NIS  (not counted as spending)",
@@ -664,6 +713,47 @@ def filter_by_period(transactions, start, end, field):
     return kept
 
 
+def prepare_analysis(data, *, completed_only=False, start=None, end=None, date_field="date"):
+    """Validate all input before selection; account for each row without status inference.
+
+    On success, received == accepted + excluded + rejected and accepted equals the
+    number of returned transactions. Rejected is zero: ANY malformed input fails the
+    whole request rather than yielding a partial report. Excluded rows are listed by
+    source path/reason only, not duplicate descriptions or account identifiers.
+    """
+    transactions = flatten_scrape_result(data)
+    input_status_counts = defaultdict(int)
+    excluded_rows = []
+    selected = []
+    for txn in transactions:
+        status_class = _status_class(txn)
+        input_status_counts[status_class] += 1
+        if completed_only and txn.get("status") != "completed":
+            excluded_rows.append({"input_path": txn["_input_path"],
+                                  "reason": "status_not_completed",
+                                  "status_class": status_class})
+        else:
+            selected.append(txn)
+    if start or end:
+        in_period = filter_by_period(selected, start, end, date_field)
+        kept_paths = {txn["_input_path"] for txn in in_period}
+        excluded_rows.extend({"input_path": txn["_input_path"], "reason": "outside_period"}
+                             for txn in selected if txn["_input_path"] not in kept_paths)
+        selected = in_period
+    analysis = analyze_transactions(selected)
+    analysis["status_policy"] = "completed_only" if completed_only else "running"
+    analysis["input_status_counts"] = dict(input_status_counts)
+    analysis["row_counts"] = {"received": len(transactions), "accepted": len(selected),
+                              "excluded": len(excluded_rows), "rejected": 0}
+    analysis["excluded_rows"] = excluded_rows
+    if excluded_rows:
+        analysis["warnings"].append(
+            f"{len(excluded_rows)} rows excluded before analysis; see row_counts and "
+            "excluded_rows. An empty completed-only result does not prove no spending."
+        )
+    return analysis
+
+
 def generate_example_transactions() -> list[dict]:
     """Generate example Israeli transactions for testing."""
     return [
@@ -694,8 +784,9 @@ def main():
     parser.add_argument("--period", type=str, default="Current", help="Period label (a label only; use --from/--to to filter)")
     parser.add_argument("--from", dest="date_from", type=str, help="Keep lines on or after this date (YYYY-MM-DD)")
     parser.add_argument("--to", dest="date_to", type=str, help="Keep lines on or before this date (YYYY-MM-DD)")
-    parser.add_argument("--exclude-pending", action="store_true",
-                        help="Drop pending lines before analysis (for a closed month or an accountant export)")
+    parser.add_argument("--completed-only", "--exclude-pending", dest="completed_only", action="store_true",
+                        help="Keep only exact source status 'completed'; --exclude-pending is an alias. "
+                             "Missing/null/unknown statuses, including statusless CSV rows, are excluded.")
     parser.add_argument("--date-field", choices=["date", "processedDate"], default="date",
                         help="Which date --from/--to filter on: date (transaction) or processedDate (billing)")
     parser.add_argument(
@@ -708,66 +799,34 @@ def main():
 
     args = parser.parse_args()
 
-    if args.example:
-        transactions = generate_example_transactions()
-        analysis = analyze_transactions(transactions)
-        # --output-json must be honoured here too. It is documented as a general flag, so
-        # returning the human-readable table for --example --output-json hands an agent
-        # text it cannot parse.
-        if args.output_json:
-            print(json.dumps(analysis, ensure_ascii=False, indent=2))
-        else:
-            print(format_analysis(analysis, "January 2026 (Example)"))
-        return
-
-    if args.json:
-        try:
+    try:
+        if args.example:
+            data = generate_example_transactions()
+        elif args.json:
             with open(args.json, encoding="utf-8") as f:
                 data = json.load(f)
-            transactions = flatten_scrape_result(data)
-            if transactions is None:
-                print(
-                    f"Error: {args.json} must contain a JSON array of transaction objects, or "
-                    "an israeli-bank-scrapers result object with an 'accounts' array, "
-                    f"got {type(data).__name__}.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            bad = next((i for i, x in enumerate(transactions) if not isinstance(x, dict)), None)
-            if bad is not None:
-                print(
-                    f"Error: {args.json} entry {bad} is a {type(transactions[bad]).__name__}, "
-                    "not a transaction object. Each entry needs at least a 'description' and "
-                    "an 'amount'.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-        except FileNotFoundError:
-            print(f"Error: File not found: {args.json}", file=sys.stderr)
-            sys.exit(1)
-        except json.JSONDecodeError as e:
-            print(f"Error: Invalid JSON: {e}", file=sys.stderr)
-            sys.exit(1)
-
-        if args.exclude_pending:
-            transactions = [t for t in transactions if t.get("status") != "pending"]
-        if args.date_from or args.date_to:
-            try:
-                transactions = filter_by_period(transactions, args.date_from, args.date_to, args.date_field)
-            except ValueError as e:
-                print(f"Error: --from/--to must be YYYY-MM-DD ({e})", file=sys.stderr)
-                sys.exit(1)
-        analysis = analyze_transactions(transactions)
-        for w in analysis["warnings"]:
-            print(f"Warning: {w}", file=sys.stderr)
-
-        if args.output_json:
-            print(json.dumps(analysis, indent=2, ensure_ascii=False))
         else:
-            print(format_analysis(analysis, args.period))
-        return
+            parser.print_help()
+            return
+        analysis = prepare_analysis(data, completed_only=args.completed_only,
+                                    start=args.date_from, end=args.date_to, date_field=args.date_field)
+    except FileNotFoundError:
+        print(f"Error: File not found: {args.json}", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as e:
+        print(f"Error: --from/--to must be YYYY-MM-DD ({e})", file=sys.stderr)
+        sys.exit(1)
 
-    parser.print_help()
+    for w in analysis["warnings"]:
+        print(f"Warning: {w}", file=sys.stderr)
+    if args.output_json:
+        print(json.dumps(analysis, indent=2, ensure_ascii=False))
+    else:
+        period = "January 2026 (Example)" if args.example else args.period
+        print(format_analysis(analysis, period))
 
 
 if __name__ == "__main__":
