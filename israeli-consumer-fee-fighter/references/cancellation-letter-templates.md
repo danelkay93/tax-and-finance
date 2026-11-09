@@ -13,7 +13,7 @@ Fill the bracketed placeholders. Send by a channel that leaves a record (registe
 
 אבקש לקבל אישור בכתב על ביטול הכרטיס ועל מועד הביטול בפועל.
 
-בנוסף, אבקש רשימה של כל החיובים החוזרים שרצים על כרטיס זה, כדי שאוכל להעביר כל אחד מהם לאמצעי תשלום אחר לפני מועד הביטול. ידוע לי שחיובים אלה ייכשלו עם ביטול הכרטיס, ושהרשאות לחיוב חשבון היושבות על חשבון הבנק אינן קשורות לכרטיס ואינן מבוטלות בעקבות ביטולו.
+בנוסף, אבקש רשימה של החיובים החוזרים בכרטיס והסבר בכתב אילו מהם עשויים להמשיך דרך שירותי עדכון או העברה, וכיצד לבטל את ההרשאות שאינן רצויות. אסדיר בנפרד מול כל בית עסק ביטול שירות או המשך תשלום, לפי בחירתי. ידוע לי שביטול או החלפת הכרטיס אינם מבטיחים הפסקת חיובים חוזרים ואינם מבטלים את החוזים עם בתי העסק; הרשאות על חשבון הבנק מטופלות בנפרד.
 
 בכבוד רב,
 [שם] [תאריך] [חתימה]
@@ -27,7 +27,7 @@ I, [full name], ID [number], the cardholder above, request to cancel this card i
 
 Please send written confirmation of the cancellation and the actual cancellation date.
 
-Please also send a list of all recurring charges billed to this card, so I can move each one to another payment method before the cancellation date. I understand that these charges will fail once the card is cancelled, and that any standing debit authorization (harshaa lechiyuv) sits on my bank account, is not tied to the card, and is not cancelled by cancelling the card.
+Please also list recurring charges on this card, explain in writing which may continue through updater/transfer services, and tell me how to cancel unwanted authorizations. I will separately arrange service cancellation or continued payment with each merchant according to my choice. I understand that card cancellation or replacement does not guarantee recurring charges stop and does not cancel merchant contracts; account-based debit authorizations must be handled separately.
 
 Sincerely,
 [name] [date] [signature]

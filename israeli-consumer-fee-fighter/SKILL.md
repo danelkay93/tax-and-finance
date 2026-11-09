@@ -54,10 +54,10 @@ Decision steps:
 
 ### B. Cancel a credit card or stop a recurring charge
 
-First separate the two mechanisms, because they behave in opposite ways:
+First distinguish the payment mechanisms and the cancellation the user wants:
 
 - **Standing debit authorization (harshaa lechiyuv / horaat keva):** set up at the BANK, on the ACCOUNT. It pulls money straight from the bank account, so it is NOT tied to any card. Cancelling a card does not touch it, and replacing a card does not stop it. You cancel or stop it at the bank (see below).
-- **Card-billed recurring charge:** a subscription billed to the card NUMBER (streaming, gym, insurance, cloud storage). These are tied to the card, so cancelling or replacing the card makes them FAIL. The fix is to update the payment method with each merchant BEFORE the old card dies, so nothing bounces.
+- **Card-billed recurring charge:** a subscription billed to card credentials (streaming, gym, insurance, cloud storage). Replacing or cancelling the card does not guarantee the charge stops: updater or transfer services may preserve recurring payments. [Visa Account Updater](https://developer.visa.com/docs/vau) documents this capability, not participation by every Israeli issuer or merchant. To end a service, cancel the merchant contract and the relevant authorization explicitly and obtain confirmation; ask the issuer how replacement/cancellation and updates are handled. For services the user wants to keep, verify the payment method with each merchant.
 
 Who to notify depends on who issued the card:
 
@@ -141,7 +141,7 @@ Use these for the user's real numbers; confirm fees against the bank's tariff.
 
 ## Gotchas
 
-- **A harshaa lechiyuv is not on the card.** It sits at the bank, on the account, and pulls straight from it. Cancelling or replacing a card does NOT stop it. A card-billed subscription is the mirror image: it dies with the card, so update the payment method with each merchant BEFORE the old card stops. Getting these two backwards is the single most common error in this domain.
+- **Separate account debits, card charges and the contract.** An account-based harshaa lechiyuv survives card cancellation. A card-billed subscription may also continue through updater/transfer services; replacement is not a guaranteed cancellation method. Explicitly cancel the unwanted contract and authorization, confirm issuer/merchant handling, and check subsequent statements.
 - **Stopping the debit does not cancel the debt.** Killing the payment instrument leaves the contract alive, so the business can still invoice or send you to collections. Cancel the underlying iska mitmasheshet too.
 - **Card charges need their own routes, run in parallel.** ss.34-38 reach a card only where the charge runs under an authorization, and an issuer may say a stored card number is not one. Do not bet the 3-business-day s.35 window on the issuer alone: cancel with the merchant at the same time, and use s.17 for unsupplied instalment purchases.
 - **The niud forwarding did not end in September 2026.** Switches before 21.9.2026 keep forwarding until 31.7.2029.
