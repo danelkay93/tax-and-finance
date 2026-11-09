@@ -1,13 +1,15 @@
 ---
 name: israeli-bank-connector
-description: Analyze Israeli bank transactions, spending patterns, and financial data across Israeli banks and credit card companies. Use when user asks about bank transactions, spending analysis, "cheshbon bank", budget tracking, or needs to categorize Israeli banking data. Pairs with israeli-bank-mcp and il-bank-mcp servers (which wrap the israeli-bank-scrapers library) to add financial-analysis workflows. Supports Hapoalim, Leumi, Discount, Mercantile, Mizrahi-Tefahot, First International (FIBI), Otsar HaHayal, Pagi, Union, Yahav, Massad, OneZero, Behatsdaa, Beyahad Bishvilha, Visa Cal, Max, Isracard, and Amex. Do NOT use for payment initiation, money transfers, or investment advice.
+description: Analyze supplied Israeli bank transactions, spending patterns and financial data. Use for spending analysis, cheshbon bank, budget tracking, CSV or JSON transaction files, and categorizing Israeli banking data. Offline categorization does not require a bank connection. Live retrieval requires a separately verified integration and its actual supported providers; the named bank MCPs and scraper are not automatically safe or available. Do NOT use for payment initiation, money transfers or investment advice.
 license: MIT
-compatibility: Requires israeli-bank-mcp or il-bank-mcp MCP server. Claude Code recommended.
+compatibility: Local categorization of supplied files uses Python and its standard library. Live bank access requires a separately verified integration and credential enrollment; it is not provided by the local helper.
 ---
 
 # Israeli Bank Connector
 
 ## Instructions
+
+When the user supplies transaction files, go directly to the input normalization and categorization instructions; no bank connection is needed. Steps 1–2 apply only to explicitly requested live retrieval through a separately verified integration.
 
 ### Step 1: Identify Connected Banks
 Check which MCP server is available and what accounts are connected:
@@ -67,7 +69,11 @@ the FULL purchase price, a pending Max line can arrive with a charged amount of 
 pending Visa Cal refund can arrive with a negative charged amount while its original amount
 is positive. The script handles all three (full-price lines and unknown amounts are listed,
 not summed; a refund follows the original's sign), but anything you compute by hand must do
-the same, and a closed month or an accountant export should leave pending lines out.
+the same, and a closed month or an accountant export should leave pending lines out. The
+script's `--completed-only` option (`--exclude-pending` is the same option) keeps only lines
+whose source `status` is exactly `completed`. Rows with no status, typical of CSV exports, are
+excluded and counted, so an empty result does not prove there was no spending; do not invent
+a status to fill it.
 
 **A bank CSV or Excel export needs normalising before the script reads it.** The script takes
 JSON, so convert the file first. Typical Israeli exports are not UTF-8 (the legacy Hebrew
@@ -106,12 +112,12 @@ savings), Into Savings, and Total Outflow (the two combined). Quoting the outflo
 "you spent X" overstates spending by whatever the user is putting away, which on an Israeli
 payslip with pension deductions is not a small amount.
 
-**Own transfers and taxes are separated too.** A line naming another account in the same
-scrape (its full number, or its last six digits as a separate number), or a foreign-currency
-purchase (המרת / רכישת מט"ח) into the user's own forex account, is reported as Own Transfers,
-both legs, in no other figure. That only works when both accounts were scraped and the bank
-prints the number, so ask the user about any large transfer (העברה) left in Other before
-calling it spending. Income tax, VAT (מע"מ), tax advance payments (מקדמות מס) and Bituach
+**Own transfers and taxes are separated too.** A foreign-currency purchase (המרת / רכישת
+מט"ח) into the user's own forex account is reported as Own Transfers, both legs, in no other
+figure. An account number, or its last digits, appearing in a description is not treated as
+proof of an own transfer, because such numbers are often invoice or merchant references; those
+lines stay in the ordinary totals. Ask the user about any large transfer (העברה) left in Other
+before calling it spending. Income tax, VAT (מע"מ), tax advance payments (מקדמות מס) and Bituach
 Leumi go to a Taxes and BL category (a plain מקדמה, a down payment to a supplier, does not): they stay in Total Spending
 because the money did leave, but they are remittances, not consumption, and never a business
 expense. A transfer to another person (Bit, PayBox, a bank transfer to someone else) is not
@@ -173,7 +179,9 @@ Prepare transactions for the user's accountant, not a filing:
   ambiguous
 - Include only completed lines, and select the period by `processedDate` (the date the
   charge actually went through) unless the accountant asks otherwise: run the script with
-  `--exclude-pending --date-field processedDate`. Pending lines can still change
+  `--completed-only --date-field processedDate` (`--exclude-pending` is the same option).
+  Pending lines can still change. An export without a status field yields no completed
+  lines; confirm settlement with the user or the statement instead of inventing a status
 - Mark lines the user says are business purchases as candidates for the accountant to
   review. Whether VAT on a purchase is deductible depends on a valid tax invoice and on the
   business, which a bank line cannot show, so do not compute or claim a deduction
@@ -207,7 +215,7 @@ Result: A CSV of the transactions the user marked as business, with a note on wh
 ### Scripts
 - `scripts/categorize_transactions.py`, Categorizes Israeli bank transactions by spending category using Israeli-specific merchant pattern matching (Shufersal, Rami Levy, Rav-Kav, etc.). Accepts either a JSON array of `{description, amount}` objects (CSV-style) or the israeli-bank-scrapers scrape result as returned by `fetch-transactions` (`accounts[].txns[]`, read via `chargedAmount`), and outputs categorized spending summaries. Filter to a period with `--from` / `--to`
 (YYYY-MM-DD) on `--date-field date` (default) or `processedDate`; library timestamps are read
-in Israel time, and `--period` is only a label. The bank-side credit-card bill and own transfers are reported as separate figures, outside Total Spending and Total Outflow, so they are not counted on top of the card's itemised lines. Foreign-currency lines are listed apart and never summed into the NIS figures; pending lines and instalment lines are counted and flagged, with pending full-price instalment purchases and pending lines of unknown amount listed but not summed. A transaction with a missing, blank, null or non-numeric amount stops the run with an error rather than being read as zero. Run: `python3 scripts/categorize_transactions.py --example` for a demo, or `python3 scripts/categorize_transactions.py --json transactions.json` for real data. Add `--output-json` for machine-readable output.
+in Israel time, and `--period` is only a label. The bank-side credit-card bill and own transfers are reported as separate figures, outside Total Spending and Total Outflow, so they are not counted on top of the card's itemised lines. Foreign-currency lines are listed apart and never summed into the NIS figures; pending lines and instalment lines are counted and flagged, with pending full-price instalment purchases and pending lines of unknown amount listed but not summed. A transaction with a missing, blank, null or non-numeric amount stops the run with an error rather than being read as zero, and any malformed row or container stops the whole run before selection, with no partial report. Reports show received, accepted and excluded row counts with the reason for each exclusion; in `--output-json`, a pending line of unknown amount carries `amount: null`. `--completed-only` (alias `--exclude-pending`) keeps only an explicit source status of `completed`. A number in a description never by itself marks a line as an own transfer. Run: `python3 scripts/categorize_transactions.py --example` for a demo, or `python3 scripts/categorize_transactions.py --json transactions.json` for real data. Add `--output-json` for machine-readable output.
 
 ### References
 - `references/spending-categories.md`, Israeli spending category definitions with Hebrew terms and common merchant examples for each category (housing/diur, groceries/mazon, transportation/tahaburah, utilities/shartuim, etc.). Consult when customizing categorization rules or explaining categories to users.
@@ -243,17 +251,8 @@ one-time codes, and it produces a complete transaction history. Treat both as se
   its variable is `HAPOALIM_USER_CODE`. A missing variable does NOT produce a helpful error:
   the server returns only a generic `BANK_SCRAPER_ERROR`, so check the `banks://list` output
   against the environment before suspecting the bank.
-- OneZero needs a long-term two-factor token, and `israeli-bank-mcp` cannot obtain one: its
-  `two-factor-auth` tool builds a fresh scraper on every call, so the `get-token` call never
-  sees the state the `trigger` call created and fails ("triggerOtp was not called"), while
-  `trigger` reports "2FA code sent" whatever happened. Get the token with the library
-  directly, calling `triggerTwoFactorAuth` (phone number starting with `+`) and then
-  `getLongTermTwoFactorToken` on the SAME scraper object, as its README shows. Treat the token
-  as a password. The server then requires an environment variable for EVERY OneZero login
-  field: `ONE_ZERO_EMAIL`, `ONE_ZERO_PASSWORD`, `ONE_ZERO_PHONE_NUMBER`,
-  `ONE_ZERO_OTP_LONG_TERM_TOKEN` (the token) and `ONE_ZERO_OTP_CODE_RETRIEVER`, which the
-  library ignores once a token is present but which must still be set to a placeholder, or
-  the server returns only the generic error.
+- OneZero may require a long-term two-factor token. The upstream bank MCP, as cloned from GitHub, creates a fresh scraper for each authentication call, ignores the trigger result and can return token material in tool output. Do not use that tool as a safe enrollment flow. Exact compatibility depends on the installed library artifact. npm registry metadata ties 6.12.2 to the reviewed library commit, but that is publisher metadata, not a check of the installed files, and no npm release contains the review's local corrections; verify the installed artifact rather than assuming it matches the reviewed source.
+  Use an authorized, verified local enrollment flow that keeps the one-time code and resulting token out of chat, command arguments and logs, and writes the token directly to the user's approved credential store. Do not invent an enrollment script or ask for the token in the conversation. If no such flow is available, stop connection setup and identify that missing capability. Do not configure placeholder credential fields to conceal an incompatible interface.
 - Never ask for, or help pass on, the user's bank password to anyone else, including their
   accountant. An accountant or bookkeeper logging into a client's account with the client's
   password in the course of their work is the conduct section 60 (see Gotchas) addresses.
@@ -269,6 +268,7 @@ one-time codes, and it produces a complete transaction history. Treat both as se
   repository or synced folder and readable only by their own account, and where their setup
   allows it, inject the variables at launch from a password manager or the OS keychain
   instead of pasting them in. A long-term two-factor token (OneZero) is a credential too.
+- Tool results may reach a remote model provider depending on the client. Identify the actual destination and keep delivery within the user's authorized task. Prefer local processing and necessary summaries; preserve currencies, dates and stable account distinctions when minimizing identifiers. Necessary authorized record handling remains allowed.
 - Do not persist raw transaction dumps beyond what the current task needs, and tell the
   user where anything you do write is stored. Note that `il-bank-mcp` keeps scraped data in
   a local SQLite database (via `better-sqlite3`, with no encryption layer declared), so a
@@ -321,7 +321,7 @@ Solution: Stop. Do not retry automatically: repeated failed logins are how an ac
 
 ### Error: TWO_FACTOR_RETRIEVER_MISSING or TIMEOUT
 Cause: the login needs a one-time code the server cannot supply (the server never prompts for one; OneZero needs a long-term token in the environment), or the bank site was slow or refused automated access
-Solution: For two-factor, obtain the long-term token with the library directly, as described under Handling credentials (the server's own `two-factor-auth` tool cannot complete it). For a timeout, retry once after a few minutes, then check the israeli-bank-scrapers GitHub issues for that bank. How often a bank asks for a new code is not documented here, so do not promise the user it is a one-time step.
+Solution: For two-factor authentication, use only the verified local enrollment flow described under Handling credentials; otherwise report that setup cannot yet be completed safely. Retry a timeout only when it is a transient connection failure, never an authentication failure, blocked account or explicit refusal of automated access. Do not promise that enrollment is needed only once.
 
 ### Error: BANK_SCRAPER_ERROR
 Cause: anything the server did not classify, most often a missing or misnamed credential variable
